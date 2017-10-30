@@ -31,6 +31,12 @@ def _openssl_get_supported_curves():
 
 
 @utils.register_interface(ec.EllipticCurve)
+class Curve25519(object):
+    name = 'curve25519'
+    key_size = 256
+
+
+@utils.register_interface(ec.EllipticCurve)
 class BrainpoolP256R1(object):
     name = 'brainpoolP256r1'
     key_size = 256

@@ -20,7 +20,8 @@ from cryptography.hazmat.primitives.ciphers import algorithms
 
 from .decorators import classproperty
 from .types import FlagEnum
-from ._curves import BrainpoolP256R1, BrainpoolP384R1, BrainpoolP512R1
+from ._curves import (BrainpoolP256R1, BrainpoolP384R1, BrainpoolP512R1,
+                      Curve25519)
 
 __all__ = ['Backend',
            'EllipticCurveOID',
@@ -58,7 +59,7 @@ class EllipticCurveOID(Enum):
     #:
     #: .. warning::
     #:     This curve is not currently usable by PGPy
-    Curve25519 = ('1.3.6.1.4.1.3029.1.5.1', )
+    Curve25519 = ('1.3.6.1.4.1.3029.1.5.1', Curve25519)
     #: Twisted Edwards variant of Curve25519
     #:
     #: .. warning::
@@ -99,7 +100,6 @@ class EllipticCurveOID(Enum):
 
         if curve is not None and curve.name in ec._CURVE_TYPES:
             obj.curve = curve
-
         return obj
 
     @property

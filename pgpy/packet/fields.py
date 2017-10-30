@@ -6,6 +6,7 @@ import abc
 import binascii
 import collections
 import copy
+import donna25519
 import hashlib
 import itertools
 import math
@@ -516,7 +517,7 @@ class ECDSAPub(PubKey):
 
 
 class ECDHPub(PubKey):
-    __pubfields__ = ('x', 'y')
+    __pubfields__ = ('x', 'y', 'compressed')
 
     def __init__(self):
         super(ECDHPub, self).__init__()
@@ -524,7 +525,11 @@ class ECDHPub(PubKey):
         self.kdf = ECKDF()
 
     def __len__(self):
-        return sum([len(getattr(self, i)) - 2 for i in self.__pubfields__] +
+        if self.compressed:
+            fields = ('compressed',)
+        else:
+            fields = ('x', 'y')
+        return sum([len(getattr(self, i)) - 2 for i in fields] +
                    [3,
                     len(self.kdf),
                     len(encoder.encode(self.oid.value)) - 1])
@@ -535,9 +540,12 @@ class ECDHPub(PubKey):
     def __bytearray__(self):
         _b = bytearray()
         _b += encoder.encode(self.oid.value)[1:]
-        # 0x04 || x || y
-        # where x and y are the same length
-        _xy = b'\x04' + self.x.to_mpibytes()[2:] + self.y.to_mpibytes()[2:]
+        if self.oid == EllipticCurveOID.Curve25519:
+            _xy = b'\x40' + self.compressed.to_mpibytes()[2:]
+        else:
+            # 0x04 || x || y
+            # where x and y are the same length
+            _xy = b'\x04' + self.x.to_mpibytes()[2:] + self.y.to_mpibytes()[2:]
         _b += MPI(self.bytes_to_int(_xy, 'big')).to_mpibytes()
         _b += self.kdf.__bytearray__()
 
@@ -593,14 +601,20 @@ class ECDHPub(PubKey):
 
         # flen = (self.oid.bit_length // 8)
         xy = bytearray(MPI(packet).to_mpibytes()[2:])
+        compression_type = xy[0]
         # xy = bytearray(MPI(packet).to_bytes(flen, 'big'))
         # the first byte is just \x04
         del xy[:1]
-        # now xy needs to be separated into x, y
-        xylen = len(xy)
-        x, y = xy[:xylen // 2], xy[xylen // 2:]
-        self.x = MPI(self.bytes_to_int(x))
-        self.y = MPI(self.bytes_to_int(y))
+        if compression_type == 0x04:
+            # now xy needs to be separated into x, y
+            xylen = len(xy)
+            x, y = xy[:xylen // 2], xy[xylen // 2:]
+            self.x = MPI(self.bytes_to_int(x))
+            self.y = MPI(self.bytes_to_int(y))
+        elif compression_type == 0x40:
+            self.compressed = MPI(self.bytes_to_int(xy))
+        else:
+            raise NotImplementedError
 
         self.kdf.parse(packet)
 
@@ -1487,14 +1501,20 @@ class ECDHCipherText(CipherText):
 
     def decrypt(self, pk, *args):
         km = pk.keymaterial
-        # assemble the public component of ephemeral key v
-        v = ec.EllipticCurvePublicNumbers(self.vX, self.vY, km.oid.curve()).public_key(default_backend())
+        if km.oid == EllipticCurveOID.Curve25519:
+            v = donna25519.PublicKey(bytes(self.compressed))
+            privk = donna25519.PrivateKey.load(km.s.to_bytes(32, 'little'))
+            s = privk.do_exchange(v)
+        else:
+            # assemble the public component of ephemeral key v
+            v = ec.EllipticCurvePublicNumbers(self.vX, self.vY, km.oid.curve()).public_key(default_backend())
 
-        # compute s using the inverse of how it was derived during encryption
-        s = km.__privkey__().exchange(ec.ECDH(), v)
-
+            # compute s using the inverse of how it was derived during encryption
+            s = km.__privkey__().exchange(ec.ECDH(), v)
+        print(type(s), len(s))
         # derive the wrapping key
         z = km.kdf.derive_key(s, km.oid, PubKeyAlgorithm.ECDH, pk.fingerprint)
+        print(pk.fingerprint, self.c)
 
         # unwrap and unpad m
         _m = aes_key_unwrap(z, self.c, default_backend())
@@ -1518,11 +1538,19 @@ class ECDHCipherText(CipherText):
     def parse(self, packet):
         # self.v = MPI(packet)
         xy = bytearray(MPI(packet).to_mpibytes()[2:])
+        compression_type = xy[0]
         del xy[:1]
-        xylen = len(xy)
-        x, y = xy[:xylen // 2], xy[xylen // 2:]
-        self.vX = MPI(self.bytes_to_int(x))
-        self.vY = MPI(self.bytes_to_int(y))
+        if compression_type == 0x04:
+            xylen = len(xy)
+            x, y = xy[:xylen // 2], xy[xylen // 2:]
+            self.vX = MPI(self.bytes_to_int(x))
+            self.vY = MPI(self.bytes_to_int(y))
+
+        elif compression_type == 0x40:
+            self.compressed = xy
+
+        else:
+            raise NotImplementedError
 
         clen = packet[0]
         del packet[0]
