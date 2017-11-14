@@ -6,6 +6,7 @@ import abc
 import binascii
 import collections
 import copy
+import donna25519
 import hashlib
 import itertools
 import math
@@ -554,9 +555,13 @@ class ECDHPub(PubKey):
     def __bytearray__(self):
         _b = bytearray()
         _b += encoder.encode(self.oid.value)[1:]
-        # 0x04 || x || y
-        # where x and y are the same length
-        _xy = b'\x04' + self.x.to_mpibytes()[2:] + self.y.to_mpibytes()[2:]
+        if self.oid == EllipticCurveOID.Curve25519:
+            # 0x40 || x
+            _xy = b'\x40' + self.x.to_mpibytes()[2:]
+        else:
+            # 0x04 || x || y
+            # where x and y are the same length
+            _xy = b'\x04' + self.x.to_mpibytes()[2:] + self.y.to_mpibytes()[2:]
         _b += MPI(self.bytes_to_int(_xy, 'big')).to_mpibytes()
         _b += self.kdf.__bytearray__()
 
@@ -613,13 +618,19 @@ class ECDHPub(PubKey):
         # flen = (self.oid.bit_length // 8)
         xy = bytearray(MPI(packet).to_mpibytes()[2:])
         # xy = bytearray(MPI(packet).to_bytes(flen, 'big'))
-        # the first byte is just \x04
+        # the first byte is just \x04 or 0x40
+        compression_type = xy[0]
         del xy[:1]
-        # now xy needs to be separated into x, y
-        xylen = len(xy)
-        x, y = xy[:xylen // 2], xy[xylen // 2:]
-        self.x = MPI(self.bytes_to_int(x))
-        self.y = MPI(self.bytes_to_int(y))
+        if compression_type == 0x04:
+            # now xy needs to be separated into x, y
+            xylen = len(xy)
+            x, y = xy[:xylen // 2], xy[xylen // 2:]
+            self.x = MPI(self.bytes_to_int(x))
+            self.y = MPI(self.bytes_to_int(y))
+        elif compression_type == 0x40:
+            self.x = MPI(self.bytes_to_int(xy))
+        else:
+            raise NotImplementedError
 
         self.kdf.parse(packet)
 
@@ -1506,11 +1517,16 @@ class ECDHCipherText(CipherText):
 
     def decrypt(self, pk, *args):
         km = pk.keymaterial
-        # assemble the public component of ephemeral key v
-        v = ec.EllipticCurvePublicNumbers(self.vX, self.vY, km.oid.curve()).public_key(default_backend())
+        if km.oid == EllipticCurveOID.Curve25519:
+            v = donna25519.PublicKey(bytes(self.vX))
+            privk = donna25519.PrivateKey.load(km.s.to_bytes(32, 'little'))
+            s = privk.do_exchange(v)
+        else:
+            # assemble the public component of ephemeral key v
+            v = ec.EllipticCurvePublicNumbers(self.vX, self.vY, km.oid.curve()).public_key(default_backend())
 
-        # compute s using the inverse of how it was derived during encryption
-        s = km.__privkey__().exchange(ec.ECDH(), v)
+            # compute s using the inverse of how it was derived during encryption
+            s = km.__privkey__().exchange(ec.ECDH(), v)
 
         # derive the wrapping key
         z = km.kdf.derive_key(s, km.oid, PubKeyAlgorithm.ECDH, pk.fingerprint)
@@ -1537,11 +1553,19 @@ class ECDHCipherText(CipherText):
     def parse(self, packet):
         # self.v = MPI(packet)
         xy = bytearray(MPI(packet).to_mpibytes()[2:])
+        compression_type = xy[0]
         del xy[:1]
-        xylen = len(xy)
-        x, y = xy[:xylen // 2], xy[xylen // 2:]
-        self.vX = MPI(self.bytes_to_int(x))
-        self.vY = MPI(self.bytes_to_int(y))
+        if compression_type == 0x04:
+            xylen = len(xy)
+            x, y = xy[:xylen // 2], xy[xylen // 2:]
+            self.vX = MPI(self.bytes_to_int(x))
+            self.vY = MPI(self.bytes_to_int(y))
+
+        elif compression_type == 0x40:
+            self.vX = xy
+
+        else:
+            raise NotImplementedError
 
         clen = packet[0]
         del packet[0]

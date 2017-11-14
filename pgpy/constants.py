@@ -99,7 +99,6 @@ class EllipticCurveOID(Enum):
 
         if curve is not None and curve.name in ec._CURVE_TYPES:
             obj.curve = curve
-
         return obj
 
     @property
